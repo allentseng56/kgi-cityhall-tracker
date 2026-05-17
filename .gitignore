@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.env
+
+# Local-only debug artefacts (not committed)
+data/debug/
+data/_inspect/
+backend/_*.py
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

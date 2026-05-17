@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>凱基市府分公司 — 持股追蹤</title>
+<style>
+  :root {
+    --bg: #0e1117;
+    --card: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --buy: #2ea043;
+    --sell: #f85149;
+    --accent: #58a6ff;
+    --warn: #d29922;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px;
+    font-family: -apple-system, "Segoe UI", "Microsoft JhengHei", sans-serif;
+    background: var(--bg); color: var(--text);
+    line-height: 1.55;
+  }
+  h1 { margin: 0 0 4px; font-size: 22px; }
+  .meta { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+  .meta span { margin-right: 16px; }
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 8px; padding: 16px 20px; margin-bottom: 20px;
+  }
+  .card h2 {
+    margin: 0 0 12px; font-size: 16px; color: var(--accent);
+    border-bottom: 1px solid var(--border); padding-bottom: 8px;
+  }
+  .card h3 {
+    margin: 14px 0 6px; font-size: 14px; color: var(--text);
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td {
+    text-align: right; padding: 8px 10px;
+    border-bottom: 1px solid var(--border);
+  }
+  th { color: var(--muted); font-weight: 500; text-align: right; white-space: nowrap; }
+  th:nth-child(1), th:nth-child(2), th:nth-child(3),
+  td:nth-child(1), td:nth-child(2), td:nth-child(3) { text-align: left; }
+  tr:hover td { background: rgba(88,166,255,0.06); }
+  .pos { color: var(--buy); font-weight: 600; }
+  .neg { color: var(--sell); font-weight: 600; }
+  .stock-id { font-family: "Consolas", monospace; color: var(--muted); }
+  .stock-name { font-weight: 600; }
+  .spark { display: block; }
+  .empty { color: var(--muted); padding: 20px; text-align: center; }
+  .errors { max-height: 200px; overflow-y: auto; padding-left: 18px; }
+  .errors li { color: var(--sell); font-size: 12px; margin: 4px 0; font-family: "Consolas", monospace; }
+  .dates-strip {
+    font-family: "Consolas", monospace; font-size: 11px;
+    color: var(--muted); margin-top: 4px;
+  }
+
+  /* Analysis section */
+  .grid {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;
+    margin-bottom: 14px;
+  }
+  .kpi {
+    background: rgba(88,166,255,0.05);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 12px;
+  }
+  .kpi-label { color: var(--muted); font-size: 12px; }
+  .kpi-value { font-size: 18px; font-weight: 600; margin-top: 2px; }
+  .kpi-sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  .verdict {
+    background: rgba(88,166,255,0.08);
+    border-left: 3px solid var(--accent);
+    padding: 10px 14px;
+    margin: 8px 0 14px;
+    border-radius: 0 4px 4px 0;
+    font-size: 14px;
+  }
+  .verdict.buy { border-left-color: var(--buy); background: rgba(46,160,67,0.08); }
+  .verdict.sell { border-left-color: var(--sell); background: rgba(248,81,73,0.08); }
+  .verdict.warn { border-left-color: var(--warn); background: rgba(210,153,34,0.08); }
+  .interp-list { padding-left: 18px; margin: 8px 0; }
+  .interp-list li { margin: 6px 0; font-size: 13px; }
+  .tag { display: inline-block; padding: 1px 8px; border-radius: 10px;
+         font-size: 11px; font-weight: 600; margin-left: 6px; vertical-align: 1px; }
+  .tag-buy { background: rgba(46,160,67,0.2); color: var(--buy); }
+  .tag-sell { background: rgba(248,81,73,0.2); color: var(--sell); }
+  .tag-flat { background: rgba(139,148,158,0.2); color: var(--muted); }
+</style>
+</head>
+<body>
+
+<h1>凱基證券市府分公司 — 持股追蹤</h1>
+<div class="meta">
+  <span id="generated"></span>
+  <span id="broker"></span>
+  <span id="coverage"></span>
+</div>
+
+<!-- 解讀區 -->
+<div class="card" id="analysisCard">
+  <h2>📊 今日動向解讀</h2>
+  <div class="grid" id="kpiGrid"></div>
+  <div id="verdict"></div>
+  <h3>重大買進訊號</h3>
+  <ul class="interp-list" id="buyInterp"></ul>
+  <h3>重大賣出訊號</h3>
+  <ul class="interp-list" id="sellInterp"></ul>
+  <h3>結構觀察</h3>
+  <ul class="interp-list" id="structInterp"></ul>
+</div>
+
+<!-- 數據表 -->
+<div class="card">
+  <h2>近 <span id="lookback"></span> 個交易日 進出量 Top 10</h2>
+  <div id="dates" class="dates-strip"></div>
+  <table id="topTable">
+    <thead>
+      <tr>
+        <th>#</th><th>代號</th><th>名稱</th>
+        <th>買進股數</th><th>賣出股數</th>
+        <th>淨買賣超</th><th>進出量</th>
+        <th>買入均價</th><th>賣出均價</th>
+        <th>淨買賣超走勢</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+  <div id="empty" class="empty" style="display:none;">
+    尚無凱基市府的資料。請等待第一次抓取完成（盤後 15:30）。
+  </div>
+</div>
+
+<div class="card" id="errCard" style="display:none;">
+  <h2>今日抓取失敗清單</h2>
+  <ul class="errors" id="errList"></ul>
+</div>
+
+<!-- 資料以 JSON script 注入，避免 JavaScript 解析錯誤 -->
+<script id="__data__" type="application/json">/*__DATA__*/</script>
+<script>
+const data = JSON.parse(document.getElementById('__data__').textContent);
+
+function fmt(n) {
+  if (n == null) return '--';
+  return n.toLocaleString('zh-TW');
+}
+function fmtPrice(p) {
+  if (p == null) return '--';
+  return p.toFixed(2);
+}
+function fmtMoney(n) {
+  if (n == null || n === 0) return '--';
+  const wan = n / 10000;
+  if (Math.abs(wan) >= 10000) return (wan/10000).toFixed(2) + ' 億';
+  return wan.toLocaleString('zh-TW', {maximumFractionDigits: 0}) + ' 萬';
+}
+function sparkline(series, width=160, height=28) {
+  if (!series || series.length === 0) return '';
+  const max = Math.max(...series.map(Math.abs), 1);
+  const stepX = width / Math.max(series.length - 1, 1);
+  const mid = height / 2;
+  const pts = series.map((v, i) => {
+    const y = mid - (v / max) * (mid - 2);
+    return `${i * stepX},${y}`;
+  }).join(' ');
+  const bars = series.map((v, i) => {
+    const h = Math.abs(v / max) * (mid - 2);
+    const y = v >= 0 ? mid - h : mid;
+    const color = v >= 0 ? '#2ea043' : '#f85149';
+    return `<rect x="${i*stepX - 2}" y="${y}" width="4" height="${h}" fill="${color}" opacity="0.7"/>`;
+  }).join('');
+  return `<svg class="spark" width="${width}" height="${height}">
+    <line x1="0" y1="${mid}" x2="${width}" y2="${mid}" stroke="#30363d" stroke-width="0.5"/>
+    ${bars}
+    <polyline points="${pts}" fill="none" stroke="#58a6ff" stroke-width="1"/>
+  </svg>`;
+}
+
+function renderMeta() {
+  document.getElementById('generated').textContent = '產生時間：' + (data.generated_at || '--');
+  document.getElementById('broker').textContent = '追蹤分點：' + (data.broker || '--');
+  document.getElementById('coverage').textContent = '資料庫累積：' +
+    (data.coverage?.days || 0) + ' 個交易日 / ' +
+    (data.coverage?.rows || 0) + ' 筆紀錄';
+  document.getElementById('lookback').textContent = data.lookback_days || 7;
+  const dates = data.covered_dates || [];
+  document.getElementById('dates').textContent =
+    dates.length ? '涵蓋日期：' + dates.join(', ') : '';
+}
+
+function renderAnalysis() {
+  const a = data.analysis;
+  if (!a) {
+    document.getElementById('analysisCard').style.display = 'none';
+    return;
+  }
+
+  // KPI cards
+  const kpis = [
+    { label: '總進出量', value: fmt(a.total_turnover_shares) + ' 股',
+      sub: '金額 ' + fmtMoney(a.total_turnover_amount) },
+    { label: '總買進', value: fmt(a.total_buy_shares) + ' 股',
+      sub: fmtMoney(a.total_buy_amount) },
+    { label: '總賣出', value: fmt(a.total_sell_shares) + ' 股',
+      sub: fmtMoney(a.total_sell_amount) },
+    { label: '淨買賣超',
+      value: (a.net_shares >= 0 ? '+' : '') + fmt(a.net_shares) + ' 股',
+      sub: (a.net_amount >= 0 ? '淨買 ' : '淨賣 ') + fmtMoney(Math.abs(a.net_amount)),
+      cls: a.net_shares >= 0 ? 'pos' : 'neg' },
+  ];
+  document.getElementById('kpiGrid').innerHTML = kpis.map(k =>
+    `<div class="kpi">
+       <div class="kpi-label">${k.label}</div>
+       <div class="kpi-value ${k.cls||''}">${k.value}</div>
+       <div class="kpi-sub">${k.sub}</div>
+     </div>`).join('');
+
+  // Overall verdict
+  const vc = a.verdict_class || 'flat';
+  document.getElementById('verdict').innerHTML =
+    `<div class="verdict ${vc}">📌 <strong>整體研判：</strong>${a.verdict_text || ''}</div>`;
+
+  // Buy interpretations
+  const buys = a.buy_interpretations || [];
+  document.getElementById('buyInterp').innerHTML = buys.length
+    ? buys.map(s => `<li>${s}</li>`).join('')
+    : '<li style="color:var(--muted)">無顯著淨買訊號</li>';
+
+  // Sell interpretations
+  const sells = a.sell_interpretations || [];
+  document.getElementById('sellInterp').innerHTML = sells.length
+    ? sells.map(s => `<li>${s}</li>`).join('')
+    : '<li style="color:var(--muted)">無顯著淨賣訊號</li>';
+
+  // Structural observations
+  const struct = a.structural_observations || [];
+  document.getElementById('structInterp').innerHTML = struct.length
+    ? struct.map(s => `<li>${s}</li>`).join('')
+    : '<li style="color:var(--muted)">--</li>';
+}
+
+function renderTable() {
+  const tbody = document.querySelector('#topTable tbody');
+  const top10 = data.top10 || [];
+  if (top10.length === 0) {
+    document.getElementById('topTable').style.display = 'none';
+    document.getElementById('empty').style.display = 'block';
+    return;
+  }
+  tbody.innerHTML = top10.map((r, i) => {
+    const net = r.net_shares || 0;
+    const netCls = net >= 0 ? 'pos' : 'neg';
+    const netSign = net >= 0 ? '+' : '';
+    const bp = r.buy_amount && r.buy_shares ? r.buy_amount / r.buy_shares : null;
+    const sp = r.sell_amount && r.sell_shares ? r.sell_amount / r.sell_shares : null;
+    return `<tr>
+      <td>${i+1}</td>
+      <td class="stock-id">${r.stock_id}</td>
+      <td class="stock-name">${r.stock_name || ''}</td>
+      <td class="pos">${fmt(r.buy_shares)}</td>
+      <td class="neg">${fmt(r.sell_shares)}</td>
+      <td class="${netCls}">${netSign}${fmt(net)}</td>
+      <td>${fmt(r.turnover)}</td>
+      <td>${fmtPrice(bp)}</td>
+      <td>${fmtPrice(sp)}</td>
+      <td>${sparkline(r.series || [])}</td>
+    </tr>`;
+  }).join('');
+}
+
+function renderErrors() {
+  const errs = data.errors || [];
+  if (errs.length) {
+    document.getElementById('errCard').style.display = 'block';
+    document.getElementById('errList').innerHTML = errs.map(e =>
+      `<li>${e.stock_id}: ${e.error_msg}</li>`).join('');
+  }
+}
+
+renderMeta();
+renderAnalysis();
+renderTable();
+renderErrors();
+</script>
+
+</body>
+</html>
