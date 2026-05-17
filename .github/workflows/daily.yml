@@ -31,10 +31,10 @@ jobs:
           python-version: '3.12'
           cache: 'pip'
 
-      - name: Cache dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests ddddocr beautifulsoup4 lxml pillow
+          pip install -r requirements.txt
 
       - name: Run daily fetch
         env:
