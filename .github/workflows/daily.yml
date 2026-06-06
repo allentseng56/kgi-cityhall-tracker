@@ -5,6 +5,11 @@ on:
   schedule:
     - cron: '30 7 * * 1-5'
   workflow_dispatch:  # 允許手動觸發（GitHub UI 上會有 Run workflow 按鈕）
+    inputs:
+      force:
+        description: '強制抓取（即使該日已有資料），用於測試富邦雲端存取'
+        type: boolean
+        default: false
 
 permissions:
   contents: write     # 需寫權限 commit SQLite + dashboard
@@ -40,7 +45,7 @@ jobs:
         env:
           PYTHONIOENCODING: utf-8
         run: |
-          python backend/run_daily.py --no-browser
+          python backend/run_daily.py --no-browser ${{ (github.event_name == 'workflow_dispatch' && inputs.force) && '--force' || '' }}
         timeout-minutes: 25
 
       - name: Prepare GitHub Pages content

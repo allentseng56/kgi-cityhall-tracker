@@ -238,7 +238,7 @@ def build_analysis(top10_all, lookback_days):
     }
 
 
-def run(top_n=100, pause=1.5, open_browser=True, skip_fetch=False):
+def run(top_n=100, pause=1.5, open_browser=True, skip_fetch=False, force=False):
     db.init_db()
     trade_date = today_str()
     print(f"[{datetime.now():%H:%M:%S}] Run start. trade_date={trade_date}, top_n={top_n}")
@@ -268,9 +268,9 @@ def run(top_n=100, pause=1.5, open_browser=True, skip_fetch=False):
             existing = conn.execute(
                 "SELECT COUNT(*) FROM kgi_cityhall_daily WHERE trade_date=?",
                 (trade_date,)).fetchone()[0]
-        if existing >= 50:
+        if existing >= 50 and not force:
             print(f"  [SKIP] trade_date={trade_date} already has {existing} rows; "
-                  f"likely a holiday/weekend re-run. Skipping fetch.")
+                  f"likely a holiday/weekend re-run. Skipping fetch (use --force to override).")
             top = []
 
         # Step 2: 富邦 per-stock (recent window, self-healing via INSERT OR IGNORE)
@@ -350,6 +350,8 @@ if __name__ == "__main__":
     ap.add_argument("--no-browser", action="store_true")
     ap.add_argument("--render-only", action="store_true",
                     help="skip fetch, only re-render dashboard from existing DB")
+    ap.add_argument("--force", action="store_true",
+                    help="force fetch even if trade_date already covered")
     args = ap.parse_args()
     run(top_n=args.top, pause=args.pause,
-        open_browser=not args.no_browser, skip_fetch=args.render_only)
+        open_browser=not args.no_browser, skip_fetch=args.render_only, force=args.force)
