@@ -1,5 +1,4 @@
+# 每日 pipeline（富邦為主，無 CAPTCHA）所需 — 雲端 GitHub Actions 使用
 requests>=2.31
-ddddocr>=1.6
 beautifulsoup4>=4.12
 lxml>=5.0
-pillow>=10.0

@@ -40,8 +40,22 @@ CREATE TABLE IF NOT EXISTS fetch_errors (
     PRIMARY KEY (trade_date, stock_id)
 );
 
+-- 股價歷史（FinMind 免費版 TaiwanStockPrice），用於事件研究/回測
+CREATE TABLE IF NOT EXISTS price_history (
+    stock_id TEXT NOT NULL,
+    trade_date TEXT NOT NULL,        -- YYYY-MM-DD
+    open REAL,
+    high REAL,
+    low REAL,
+    close REAL,
+    volume INTEGER,                  -- 成交股數
+    PRIMARY KEY (stock_id, trade_date)
+);
+
 CREATE INDEX IF NOT EXISTS idx_kgi_date ON kgi_cityhall_daily(trade_date);
 CREATE INDEX IF NOT EXISTS idx_kgi_stock ON kgi_cityhall_daily(stock_id);
+CREATE INDEX IF NOT EXISTS idx_price_stock ON price_history(stock_id);
+CREATE INDEX IF NOT EXISTS idx_price_date ON price_history(trade_date);
 """
 
 
@@ -93,6 +107,37 @@ def upsert_kgi_row(trade_date, stock_id, stock_name, agg):
         )
 
 
+def insert_kgi_if_absent(trade_date, stock_id, stock_name, buy_shares, sell_shares):
+    """
+    Insert a historical (backfilled) row only if (trade_date, stock_id) doesn't
+    already exist — protects exact BSR rows from being overwritten by rounded
+    富邦 data. Backfilled rows have NULL prices/amounts (implicit source marker).
+    Returns True if inserted, False if a row already existed.
+    """
+    with get_conn() as c:
+        cur = c.execute(
+            """INSERT OR IGNORE INTO kgi_cityhall_daily
+               (trade_date, stock_id, stock_name, buy_shares, sell_shares,
+                avg_buy_price, avg_sell_price, buy_amount, sell_amount,
+                net_shares, turnover)
+               VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?)""",
+            (trade_date, stock_id, stock_name, buy_shares, sell_shares,
+             buy_shares - sell_shares, buy_shares + sell_shares),
+        )
+        return cur.rowcount > 0
+
+
+def top100_list():
+    """Return [(stock_id, stock_name)] from the most recent daily_top100 snapshot."""
+    with get_conn() as c:
+        latest = c.execute("SELECT MAX(trade_date) FROM daily_top100").fetchone()[0]
+        if not latest:
+            return []
+        return [(r["stock_id"], r["stock_name"]) for r in c.execute(
+            "SELECT stock_id, stock_name FROM daily_top100 WHERE trade_date=? ORDER BY rank",
+            (latest,)).fetchall()]
+
+
 def log_error(trade_date, stock_id, msg):
     with get_conn() as c:
         c.execute(
@@ -122,17 +167,20 @@ def query_top10_recent(days=7):
         if not dates:
             return [], []
         placeholders = ",".join("?" * len(dates))
+        # 金額用 price_history 收盤估算（富邦資料無價格）；有 BSR 精確金額時優先用之
         rows = c.execute(
-            f"""SELECT stock_id, stock_name,
-                       SUM(buy_shares) AS buy_shares,
-                       SUM(sell_shares) AS sell_shares,
-                       SUM(buy_amount) AS buy_amount,
-                       SUM(sell_amount) AS sell_amount,
-                       SUM(net_shares) AS net_shares,
-                       SUM(turnover) AS turnover
-                FROM kgi_cityhall_daily
-                WHERE trade_date IN ({placeholders})
-                GROUP BY stock_id, stock_name
+            f"""SELECT k.stock_id, k.stock_name,
+                       SUM(k.buy_shares) AS buy_shares,
+                       SUM(k.sell_shares) AS sell_shares,
+                       SUM(COALESCE(k.buy_amount,  k.buy_shares  * p.close)) AS buy_amount,
+                       SUM(COALESCE(k.sell_amount, k.sell_shares * p.close)) AS sell_amount,
+                       SUM(k.net_shares) AS net_shares,
+                       SUM(k.turnover) AS turnover
+                FROM kgi_cityhall_daily k
+                LEFT JOIN price_history p
+                  ON p.stock_id = k.stock_id AND p.trade_date = k.trade_date
+                WHERE k.trade_date IN ({placeholders})
+                GROUP BY k.stock_id, k.stock_name
                 ORDER BY turnover DESC
                 LIMIT 10""",
             dates,
@@ -148,16 +196,18 @@ def query_all_aggregate(dates):
     placeholders = ",".join("?" * len(dates))
     with get_conn() as c:
         rows = c.execute(
-            f"""SELECT stock_id, stock_name,
-                       SUM(buy_shares) AS buy_shares,
-                       SUM(sell_shares) AS sell_shares,
-                       SUM(buy_amount) AS buy_amount,
-                       SUM(sell_amount) AS sell_amount,
-                       SUM(net_shares) AS net_shares,
-                       SUM(turnover) AS turnover
-                FROM kgi_cityhall_daily
-                WHERE trade_date IN ({placeholders})
-                GROUP BY stock_id, stock_name""",
+            f"""SELECT k.stock_id, k.stock_name,
+                       SUM(k.buy_shares) AS buy_shares,
+                       SUM(k.sell_shares) AS sell_shares,
+                       SUM(COALESCE(k.buy_amount,  k.buy_shares  * p.close)) AS buy_amount,
+                       SUM(COALESCE(k.sell_amount, k.sell_shares * p.close)) AS sell_amount,
+                       SUM(k.net_shares) AS net_shares,
+                       SUM(k.turnover) AS turnover
+                FROM kgi_cityhall_daily k
+                LEFT JOIN price_history p
+                  ON p.stock_id = k.stock_id AND p.trade_date = k.trade_date
+                WHERE k.trade_date IN ({placeholders})
+                GROUP BY k.stock_id, k.stock_name""",
             list(dates),
         ).fetchall()
     return [dict(r) for r in rows]
@@ -192,7 +242,68 @@ def query_coverage():
         return {"days": days, "rows": rows}
 
 
+# ============================================================
+# Price history helpers (for event study / backtest)
+# ============================================================
+
+def upsert_prices(stock_id, rows):
+    """rows: list of dict {trade_date, open, high, low, close, volume}"""
+    if not rows:
+        return
+    with get_conn() as c:
+        c.executemany(
+            """INSERT OR REPLACE INTO price_history
+               (stock_id, trade_date, open, high, low, close, volume)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            [(stock_id, r["trade_date"], r.get("open"), r.get("high"),
+              r.get("low"), r.get("close"), r.get("volume")) for r in rows],
+        )
+
+
+def query_price_range(stock_id):
+    """Return (min_date, max_date, count) of stored prices for a stock."""
+    with get_conn() as c:
+        row = c.execute(
+            """SELECT MIN(trade_date), MAX(trade_date), COUNT(*)
+               FROM price_history WHERE stock_id=?""", (stock_id,)).fetchone()
+    return row[0], row[1], row[2]
+
+
+def query_prices(stock_id, start_date=None, end_date=None):
+    """Return ordered list of price dicts for a stock within optional range."""
+    q = "SELECT trade_date, open, high, low, close, volume FROM price_history WHERE stock_id=?"
+    args = [stock_id]
+    if start_date:
+        q += " AND trade_date >= ?"; args.append(start_date)
+    if end_date:
+        q += " AND trade_date <= ?"; args.append(end_date)
+    q += " ORDER BY trade_date ASC"
+    with get_conn() as c:
+        return [dict(r) for r in c.execute(q, args).fetchall()]
+
+
+def signal_stock_ids():
+    """All distinct stock_ids ever recorded in kgi_cityhall_daily (= signal universe)."""
+    with get_conn() as c:
+        return [r[0] for r in c.execute(
+            "SELECT DISTINCT stock_id FROM kgi_cityhall_daily").fetchall()]
+
+
+def earliest_signal_date():
+    with get_conn() as c:
+        row = c.execute("SELECT MIN(trade_date) FROM kgi_cityhall_daily").fetchone()
+    return row[0] if row else None
+
+
+def price_coverage():
+    with get_conn() as c:
+        stocks = c.execute("SELECT COUNT(DISTINCT stock_id) FROM price_history").fetchone()[0]
+        rows = c.execute("SELECT COUNT(*) FROM price_history").fetchone()[0]
+        return {"stocks": stocks, "rows": rows}
+
+
 if __name__ == "__main__":
     init_db()
     print(f"DB initialized at {DB_PATH}")
-    print(query_coverage())
+    print("kgi:", query_coverage())
+    print("price:", price_coverage())

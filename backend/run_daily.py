@@ -2,11 +2,16 @@
 """
 KGI City-Hall Tracker — daily orchestrator.
 
-Pipeline:
-  1. Fetch market top-N stocks by volume from TWSE
-  2. For each: fetch BSR, filter 凱基市府, write to SQLite
+Pipeline (primary source = 富邦 DJ, verified more reliable than TWSE BSR):
+  1. Fetch market top-N stocks by volume from TWSE (defines the universe)
+  2. For each: fetch 凱基市府 from 富邦 (recent window, self-healing), write to SQLite
   3. Query last 7 trading days, build top-10 turnover ranking
   4. Render dashboard.html
+
+Note: 富邦 data is in 張 (×1000 = shares, rounded), no per-trade prices.
+The legacy BSR path (bsr_fetcher.py) is kept for manual cross-verification
+(verify_sources.py) but is NOT used for the daily run due to an intermittent
+undercounting bug (fallback to summary page).
 """
 import argparse
 import json
@@ -14,14 +19,14 @@ import sys
 import time
 import traceback
 import webbrowser
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import db
 from twse_top100 import fetch_top_n
-from bsr_fetcher import fetch_stock_bsr, BsrError
+from fubon_fetcher import fetch_branch_series
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT_HTML = ROOT / "output" / "dashboard.html"
@@ -29,6 +34,8 @@ TEMPLATE = Path(__file__).resolve().parent / "template.html"
 
 BROKER_MATCH = "凱基市府"
 LOOKBACK_DAYS = 7
+LOTS_TO_SHARES = 1000
+HEAL_WINDOW_DAYS = 10   # 每日抓最近 N 天，自動補回任何遺漏日（self-healing）
 
 
 def today_str():
@@ -231,13 +238,13 @@ def build_analysis(top10_all, lookback_days):
     }
 
 
-def run(top_n=100, max_per_stock=15, pause=2.0, open_browser=True, skip_fetch=False):
+def run(top_n=100, pause=1.5, open_browser=True, skip_fetch=False):
     db.init_db()
     trade_date = today_str()
     print(f"[{datetime.now():%H:%M:%S}] Run start. trade_date={trade_date}, top_n={top_n}")
 
     if not skip_fetch:
-        # Step 1: TWSE top-N (returns the actual trade date used)
+        # Step 1: TWSE top-N (defines universe + gives latest trade date)
         try:
             trade_date, top = fetch_top_n(top_n)
             print(f"  [TWSE] trade_date={trade_date}, top {len(top)} fetched")
@@ -247,50 +254,54 @@ def run(top_n=100, max_per_stock=15, pause=2.0, open_browser=True, skip_fetch=Fa
             traceback.print_exc()
             top = []
 
-        # Skip BSR fetch if this trade_date is already well-covered in DB
-        # (e.g. weekend/holiday cron firings would otherwise re-fetch Friday's
-        # data and waste ~10 min of GitHub Actions minutes)
+        # Skip if this trade_date already well-covered (holiday/weekend re-runs)
         with db.get_conn() as conn:
             existing = conn.execute(
                 "SELECT COUNT(*) FROM kgi_cityhall_daily WHERE trade_date=?",
                 (trade_date,)).fetchone()[0]
         if existing >= 50:
             print(f"  [SKIP] trade_date={trade_date} already has {existing} rows; "
-                  f"likely a holiday/weekend re-run. Skipping BSR fetch.")
+                  f"likely a holiday/weekend re-run. Skipping fetch.")
             top = []
 
-        # Step 2: BSR per-stock
-        success = 0
-        skipped = 0
+        # Step 2: 富邦 per-stock (recent window, self-healing via INSERT OR IGNORE)
+        heal_start = (datetime.strptime(trade_date, "%Y-%m-%d")
+                      - timedelta(days=HEAL_WINDOW_DAYS)).strftime("%Y-%m-%d")
+        inserted = 0
+        with_activity = 0
         errors = 0
         for r in top:
             sid = r["stock_id"]
             name = r["stock_name"]
             print(f"  [{r['rank']:3d}/{len(top)}] {sid} {name} ... ", end="", flush=True)
             try:
-                agg, _records, attempts = fetch_stock_bsr(
-                    sid, max_attempts=max_per_stock, broker_match=BROKER_MATCH,
-                    pause_between=1.0, verbose=False)
-                if agg is None:
-                    print(f"no 凱基市府 activity (attempts={attempts})")
-                    skipped += 1
+                series = fetch_branch_series(sid, heal_start, trade_date)
+                ins = 0
+                today_buy = today_sell = 0
+                for row in series:
+                    if row["buy_lots"] == 0 and row["sell_lots"] == 0:
+                        continue
+                    if db.insert_kgi_if_absent(
+                            row["trade_date"], sid, name,
+                            row["buy_lots"] * LOTS_TO_SHARES,
+                            row["sell_lots"] * LOTS_TO_SHARES):
+                        ins += 1
+                    if row["trade_date"] == trade_date:
+                        today_buy = row["buy_lots"]
+                        today_sell = row["sell_lots"]
+                inserted += ins
+                if today_buy or today_sell:
+                    with_activity += 1
+                    print(f"今日 買{today_buy}/賣{today_sell} 張 (+{ins} 列)")
                 else:
-                    db.upsert_kgi_row(trade_date, sid, name, agg)
-                    db.clear_error(trade_date, sid)
-                    print(f"buy={agg['buy_shares']:,} sell={agg['sell_shares']:,} "
-                          f"(attempts={attempts})")
-                    success += 1
-            except BsrError as e:
-                print(f"FAIL: {e}")
-                db.log_error(trade_date, sid, str(e))
-                errors += 1
+                    print(f"今日無交易 (+{ins} 列)")
             except Exception as e:
-                print(f"EXCEPTION: {e}")
-                db.log_error(trade_date, sid, f"unexpected: {e}")
+                print(f"FAIL: {e}")
+                db.log_error(trade_date, sid, f"fubon: {e}")
                 errors += 1
             time.sleep(pause)
 
-        print(f"\n  Summary: success={success} no-activity={skipped} errors={errors}")
+        print(f"\n  Summary: 今日有交易 {with_activity} 檔，新增 {inserted} 列，失敗 {errors}")
 
     # Step 3: query & render
     dates, top10 = db.query_top10_recent(days=LOOKBACK_DAYS)
@@ -325,13 +336,11 @@ def run(top_n=100, max_per_stock=15, pause=2.0, open_browser=True, skip_fetch=Fa
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--top", type=int, default=100, help="how many top-volume stocks to scan")
-    ap.add_argument("--max-per-stock", type=int, default=15,
-                    help="max BSR retry attempts per stock")
-    ap.add_argument("--pause", type=float, default=2.0,
-                    help="seconds between stocks")
+    ap.add_argument("--pause", type=float, default=1.5,
+                    help="seconds between stocks (富邦 throttle)")
     ap.add_argument("--no-browser", action="store_true")
     ap.add_argument("--render-only", action="store_true",
                     help="skip fetch, only re-render dashboard from existing DB")
     args = ap.parse_args()
-    run(top_n=args.top, max_per_stock=args.max_per_stock, pause=args.pause,
+    run(top_n=args.top, pause=args.pause,
         open_browser=not args.no_browser, skip_fetch=args.render_only)

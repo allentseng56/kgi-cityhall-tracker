@@ -1,0 +1,5 @@
+# 額外套件：僅「官方 BSR 交叉驗證」(verify_sources.py / bsr_fetcher.py) 需要。
+# 每日 pipeline 不需要這些。本機手動驗證時才安裝：
+#   pip install -r requirements.txt -r requirements-verify.txt
+ddddocr>=1.6
+pillow>=10.0

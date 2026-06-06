@@ -1,12 +1,21 @@
 # 凱基證券市府分公司 — 持股追蹤系統
 
-每日盤後自動抓取證交所市場成交量前 100 大個股的分點明細（BSR），filter 出「**920D 凱基市府**」的進出資料，寫入 SQLite，並產生近 7 個交易日進出量 Top 10 的儀表板。
+每日盤後自動抓取市場成交量前 100 大個股，filter 出「**凱基市府（920D）**」的進出資料，寫入 SQLite，並產生近 7 個交易日進出量 Top 10 + 解讀的儀表板。
+
+## 資料來源（重要）
+
+- **每日主來源：富邦 DJ**（`fubon-ebrokerdj`）。免 CAPTCHA、穩定、且有歷史。單位為「張」(×1000=股)，無逐筆價格（金額用收盤估算）。
+- **官方 TWSE BSR**：保留作「交叉驗證」用（`verify_sources.py`），**不再用於每日抓取**——因其爬蟲在抓不到完整內容頁時會 fallback 解析摘要頁，造成間歇性漏抓（驗證實測約 45% 偏低）。
+- **股價（FinMind 免費 TaiwanStockPrice）**：供事件研究/回測。
+
+> 為何換掉 BSR？以官方 BSR 為基準交叉驗證發現：富邦資料與「正確抓取的」官方 BSR 完全吻合，但我們自己的 BSR 爬蟲會間歇漏抓。富邦反而更可靠且免驗證碼。
 
 ## 環境
 
 - **Python 3.12.10**（`%LOCALAPPDATA%\Programs\Python\Python312`）
-- 套件：`requests`、`ddddocr`、`beautifulsoup4`、`lxml`、`pillow`（已安裝）
-- Windows Task Scheduler
+- 每日 pipeline 套件：`requests`、`beautifulsoup4`、`lxml`（見 `requirements.txt`）
+- 交叉驗證額外套件：`ddddocr`、`pillow`（見 `requirements-verify.txt`，僅本機驗證時需要）
+- 自動化：GitHub Actions（雲端）或 Windows Task Scheduler（本機）
 
 ## 檔案結構
 
