@@ -33,16 +33,35 @@ def _to_int(s):
         return 0
 
 
-def fetch_top_n(n=100):
+def fetch_top_n(n=100, retries=4, pause=3.0):
     """
     Returns (trade_date_iso, list of {rank, stock_id, stock_name, volume}).
     The endpoint always returns the latest trading day's data.
+
+    TWSE OpenAPI intermittently returns a non-JSON error/empty page (esp. from
+    non-Taiwan IPs like GitHub Actions). Retry a few times before giving up so
+    the caller can decide to fall back to a cached universe.
     """
-    r = requests.get(TWSE_URL, headers=HEADERS, timeout=30)
-    r.raise_for_status()
-    rows = r.json()
-    if not isinstance(rows, list) or not rows:
-        raise RuntimeError("TWSE OpenAPI returned empty list")
+    import time
+    last_err = None
+    rows = None
+    for attempt in range(1, retries + 1):
+        try:
+            r = requests.get(TWSE_URL, headers=HEADERS, timeout=30)
+            r.raise_for_status()
+            ct = r.headers.get("Content-Type", "")
+            if "json" not in ct.lower() and not r.text.lstrip().startswith("["):
+                raise RuntimeError(f"non-JSON response (CT={ct!r}, head={r.text[:60]!r})")
+            rows = r.json()
+            if isinstance(rows, list) and rows:
+                break
+            raise RuntimeError("empty list")
+        except Exception as e:
+            last_err = e
+            if attempt < retries:
+                time.sleep(pause)
+    if not rows:
+        raise RuntimeError(f"TWSE OpenAPI failed after {retries} tries: {last_err}")
 
     trade_date = _roc_to_iso(rows[0].get("Date", ""))
 

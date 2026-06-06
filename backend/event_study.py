@@ -210,11 +210,113 @@ def run(signal_type="purebuy", windows=(1, 3, 5, 10, 20)):
     print("  3. 需累積更多訊號日（或回補 FinMind 付費分點歷史）才能得到可信的統計結論。")
 
 
+def path_metrics(stock_id, signal_date, window):
+    """
+    路徑分析（不固定持有天數）：追蹤進場後的價格路徑，找出自然獲利週期。
+    進場 = 訊號隔日開盤。觀察窗 = window 個交易日。
+    回傳：
+      ever_profit          觀察窗內是否曾獲利（收盤 > 進場）
+      days_to_first_profit 首次收盤獲利的天數
+      peak_day             波段最高收盤的天數（= 開始侵蝕的轉折點）
+      peak_return          在峰值賣出的報酬%（理想最佳出場）
+      run_days             首次獲利 → 峰值 的天數（獲利維持多久才見頂）
+      final_return         續抱到觀察窗結束的報酬%（對照：不賣的下場）
+      erosion              峰值報酬 − 結束報酬（續抱被侵蝕掉多少%）
+    """
+    prices = db.query_prices(stock_id)
+    if not prices:
+        return None
+    dates = [p["trade_date"] for p in prices]
+    if signal_date not in dates:
+        return None
+    i0 = dates.index(signal_date)
+    forward = prices[i0 + 1:]
+    if not forward:
+        return None
+    entry = forward[0]["open"] or forward[0]["close"]
+    if not entry:
+        return None
+
+    ws = forward[:window]
+    closes = [(j + 1, p["close"]) for j, p in enumerate(ws) if p["close"]]
+    if not closes:
+        return None
+
+    first_profit_day = None
+    for day, px in closes:
+        if px > entry:
+            first_profit_day = day
+            break
+    peak_day, peak_px = max(closes, key=lambda t: t[1])
+    peak_return = (peak_px / entry - 1) * 100
+    final_return = (closes[-1][1] / entry - 1) * 100
+    ever_profit = first_profit_day is not None
+    run_days = (peak_day - first_profit_day) if ever_profit else None
+
+    return {
+        "stock_id": stock_id, "signal_date": signal_date, "entry": entry,
+        "ever_profit": ever_profit,
+        "days_to_first_profit": first_profit_day,
+        "peak_day": peak_day,
+        "peak_return": peak_return,
+        "run_days": run_days,
+        "final_return": final_return,
+        "erosion": peak_return - final_return,
+    }
+
+
+def run_path(signal_type="purebuy", window=20):
+    db.init_db()
+    signals = get_signals(signal_type)
+    events = [m for (d, sid, name) in signals
+              if (m := path_metrics(sid, d, window)) is not None]
+
+    print(f"=== 路徑分析（動態獲利週期）：訊號 = {signal_type} ===")
+    print(f"進場 = 訊號隔日開盤；觀察窗 = {window} 個交易日；原始報酬")
+    print(f"可分析事件數：{len(events)}")
+    if not events:
+        print("⚠️ 無可用事件（請先 update_prices.py）。")
+        return
+    print()
+
+    n = len(events)
+    profitable = [e for e in events if e["ever_profit"]]
+    pct_profit = len(profitable) / n * 100
+
+    print(f"【1. 買入後多久會獲利】")
+    print(f"  觀察窗內曾獲利的比例：{pct_profit:.0f}%（{len(profitable)}/{n}）")
+    print(f"  平均首次獲利天數：{_avg([e['days_to_first_profit'] for e in profitable]):.1f} 天"
+          f"（中位數 {_median([e['days_to_first_profit'] for e in profitable]):.0f} 天）")
+    print()
+    print(f"【2. 開始獲利後多久見頂（開始侵蝕）】")
+    print(f"  平均（首次獲利→峰值）：{_avg([e['run_days'] for e in profitable]):.1f} 天"
+          f"（中位數 {_median([e['run_days'] for e in profitable]):.0f} 天）")
+    print(f"  平均到峰總天數（進場→峰值）：{_avg([e['peak_day'] for e in profitable]):.1f} 天")
+    print()
+    print(f"【3. 在峰值（侵蝕起點）賣出的獲利】")
+    print(f"  平均：{_avg([e['peak_return'] for e in profitable]):+.2f}%"
+          f"（中位數 {_median([e['peak_return'] for e in profitable]):+.2f}%）")
+    print()
+    print(f"【對照：若不賣、續抱到第 {window} 天】")
+    print(f"  平均報酬：{_avg([e['final_return'] for e in events]):+.2f}%"
+          f"（中位數 {_median([e['final_return'] for e in events]):+.2f}%）")
+    print(f"  平均被侵蝕掉：{_avg([e['erosion'] for e in events]):.2f}%（峰值未賣的代價）")
+    print()
+    print("⚠️ 注意：峰值是事後最佳出場（含未來資訊），實務無法精準賣在最高點；")
+    print("   此為「獲利週期的統計描述」，非可直接執行的策略。真正可執行需用移動停利等規則。")
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--signal", default="purebuy",
                     choices=["purebuy", "strongbuy", "topnet"])
-    ap.add_argument("--windows", default="1,3,5,10,20")
+    ap.add_argument("--mode", default="window", choices=["window", "path"],
+                    help="window=固定持有天數; path=動態獲利週期")
+    ap.add_argument("--windows", default="1,3,5,10,20", help="window 模式用")
+    ap.add_argument("--window", type=int, default=20, help="path 模式觀察窗天數")
     args = ap.parse_args()
-    windows = tuple(int(x) for x in args.windows.split(","))
-    run(signal_type=args.signal, windows=windows)
+    if args.mode == "path":
+        run_path(signal_type=args.signal, window=args.window)
+    else:
+        windows = tuple(int(x) for x in args.windows.split(","))
+        run(signal_type=args.signal, windows=windows)

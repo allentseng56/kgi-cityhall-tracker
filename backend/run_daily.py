@@ -251,8 +251,17 @@ def run(top_n=100, pause=1.5, open_browser=True, skip_fetch=False):
             db.upsert_top100(trade_date, top)
         except Exception as e:
             print(f"  [TWSE] FAILED: {e}")
-            traceback.print_exc()
-            top = []
+            # Fallback: use the last-known Top100 universe from DB so the daily
+            # 富邦 fetch can still proceed (TWSE OpenAPI intermittently fails
+            # from non-TW IPs). trade_date stays as today; 富邦 series carries
+            # its own dates so rows are stored under the correct trading day.
+            cached = db.top100_list()
+            if cached:
+                top = [{"rank": i + 1, "stock_id": sid, "stock_name": name}
+                       for i, (sid, name) in enumerate(cached[:top_n])]
+                print(f"  [TWSE] fallback to cached Top{len(top)} universe from DB")
+            else:
+                top = []
 
         # Skip if this trade_date already well-covered (holiday/weekend re-runs)
         with db.get_conn() as conn:
