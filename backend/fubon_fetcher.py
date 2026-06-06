@@ -34,15 +34,19 @@ def encode_branch(branch_code):
 def fetch_branch_series(stock_id, start, end,
                         branch_code=KGI_CITYHALL_BRANCH,
                         broker_bhid=KGI_BROKER_BHID,
+                        b_raw=None,
                         timeout=30):
     """
     Return list of {trade_date, buy_lots, sell_lots} (張) for one branch on
     one stock over [start, end] (YYYY-MM-DD). Empty list if no activity.
     Raises requests.RequestException on network failure.
+
+    b_raw: 若提供，直接當作 `b` 參數（用排行頁抓到的原始 b-code，純數字分點
+    如凱基台北=9268 不可用 encode_branch）。BHID 在 b 為完整分點碼時可留空。
     """
     params = {
         "a": stock_id,
-        "b": encode_branch(branch_code),
+        "b": b_raw if b_raw is not None else encode_branch(branch_code),
         "BHID": broker_bhid,
         "C": "1",
         "D": start,

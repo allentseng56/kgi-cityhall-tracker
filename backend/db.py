@@ -52,6 +52,21 @@ CREATE TABLE IF NOT EXISTS price_history (
     PRIMARY KEY (stock_id, trade_date)
 );
 
+-- 通用多分點每日資料（測試其他券商分點用，來源：富邦DJ，張×1000=股）
+CREATE TABLE IF NOT EXISTS branch_daily (
+    broker_code TEXT NOT NULL,       -- 富邦 b-code（識別分點）
+    broker_name TEXT NOT NULL,       -- 如 凱基-台北
+    trade_date TEXT NOT NULL,
+    stock_id TEXT NOT NULL,
+    stock_name TEXT NOT NULL,
+    buy_shares INTEGER NOT NULL,
+    sell_shares INTEGER NOT NULL,
+    net_shares INTEGER,
+    turnover INTEGER,
+    PRIMARY KEY (broker_code, trade_date, stock_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_branch ON branch_daily(broker_code, trade_date);
 CREATE INDEX IF NOT EXISTS idx_kgi_date ON kgi_cityhall_daily(trade_date);
 CREATE INDEX IF NOT EXISTS idx_kgi_stock ON kgi_cityhall_daily(stock_id);
 CREATE INDEX IF NOT EXISTS idx_price_stock ON price_history(stock_id);
@@ -125,6 +140,76 @@ def insert_kgi_if_absent(trade_date, stock_id, stock_name, buy_shares, sell_shar
              buy_shares - sell_shares, buy_shares + sell_shares),
         )
         return cur.rowcount > 0
+
+
+def insert_branch_if_absent(broker_code, broker_name, trade_date, stock_id,
+                            stock_name, buy_shares, sell_shares):
+    with get_conn() as c:
+        cur = c.execute(
+            """INSERT OR IGNORE INTO branch_daily
+               (broker_code, broker_name, trade_date, stock_id, stock_name,
+                buy_shares, sell_shares, net_shares, turnover)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (broker_code, broker_name, trade_date, stock_id, stock_name,
+             buy_shares, sell_shares, buy_shares - sell_shares, buy_shares + sell_shares),
+        )
+        return cur.rowcount > 0
+
+
+def query_branch_signals(broker_code, signal_type="purebuy", min_shares=10000, since=None):
+    """Return [(trade_date, stock_id, stock_name)] qualifying buy signals for a branch."""
+    q = "SELECT trade_date, stock_id, stock_name, buy_shares, sell_shares, net_shares FROM branch_daily WHERE broker_code=?"
+    args = [broker_code]
+    if since:
+        q += " AND trade_date >= ?"; args.append(since)
+    with get_conn() as c:
+        rows = [dict(r) for r in c.execute(q, args).fetchall()]
+    sig = []
+    for r in rows:
+        if signal_type == "purebuy":
+            ok = r["sell_shares"] == 0 and r["buy_shares"] >= min_shares
+        elif signal_type == "strongbuy":
+            ok = r["buy_shares"] >= 5 * max(r["sell_shares"], 1) and r["net_shares"] >= min_shares
+        elif signal_type == "topnet":
+            ok = r["net_shares"] >= min_shares
+        # 賣超訊號（反指標測試：分點賣超 → 隔日買進）
+        elif signal_type == "puresell":
+            ok = r["buy_shares"] == 0 and r["sell_shares"] >= min_shares
+        elif signal_type == "strongsell":
+            ok = r["sell_shares"] >= 5 * max(r["buy_shares"], 1) and -r["net_shares"] >= min_shares
+        elif signal_type == "topnetsell":
+            ok = -r["net_shares"] >= min_shares
+        else:
+            ok = False
+        if ok:
+            sig.append((r["trade_date"], r["stock_id"], r["stock_name"]))
+    return sig
+
+
+def query_branch_net_buys(broker_code, since=None):
+    """淨買事件 [(date, stock_id, name, net_buy_amount)]，金額=淨買股數×當日收盤。
+    用於『極端金額』篩選（只看買方，net_shares>0）。"""
+    q = ("SELECT b.trade_date, b.stock_id, b.stock_name, b.net_shares, p.close "
+         "FROM branch_daily b LEFT JOIN price_history p "
+         "ON p.stock_id=b.stock_id AND p.trade_date=b.trade_date "
+         "WHERE b.broker_code=? AND b.net_shares>0")
+    args = [broker_code]
+    if since:
+        q += " AND b.trade_date>=?"; args.append(since)
+    out = []
+    with get_conn() as c:
+        for r in c.execute(q, args).fetchall():
+            if r["close"]:
+                out.append((r["trade_date"], r["stock_id"], r["stock_name"],
+                            r["net_shares"] * r["close"]))
+    return out
+
+
+def branch_coverage(broker_code):
+    with get_conn() as c:
+        row = c.execute("SELECT COUNT(DISTINCT trade_date), COUNT(*), SUM(turnover) "
+                        "FROM branch_daily WHERE broker_code=?", (broker_code,)).fetchone()
+    return {"days": row[0], "rows": row[1], "turnover": row[2] or 0}
 
 
 def top100_list():

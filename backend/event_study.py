@@ -306,17 +306,128 @@ def run_path(signal_type="purebuy", window=20):
     print("   此為「獲利週期的統計描述」，非可直接執行的策略。真正可執行需用移動停利等規則。")
 
 
+def _bench_index(benchmark="0050"):
+    """date -> {'open':, 'close':} map for the benchmark."""
+    rows = db.query_prices(benchmark)
+    return {r["trade_date"]: r for r in rows}
+
+
+def strategy_metrics(stock_id, signal_date, trail_pct, max_window, bench_idx):
+    """
+    可執行策略模擬：訊號隔日開盤進場，移動停利出場。
+      - 追蹤進場後的最高收盤（含進場價為起點）
+      - 當收盤 <= 最高點 ×(1 - trail_pct%) 時隔日出場（這裡用當日收盤近似出場價）
+      - 或達 max_window 天強制出場
+    同時計算同期 0050 報酬以求超額報酬。
+    """
+    prices = db.query_prices(stock_id)
+    if not prices:
+        return None
+    dates = [p["trade_date"] for p in prices]
+    if signal_date not in dates:
+        return None
+    i0 = dates.index(signal_date)
+    forward = prices[i0 + 1:]
+    if not forward:
+        return None
+    entry_row = forward[0]
+    entry = entry_row["open"] or entry_row["close"]
+    entry_date = entry_row["trade_date"]
+    if not entry:
+        return None
+
+    ws = forward[:max_window]
+    peak = entry
+    exit_px = None
+    exit_day = len(ws)
+    exit_date = ws[-1]["trade_date"]
+    for day, p in enumerate(ws, 1):
+        c = p["close"]
+        if not c:
+            continue
+        if c > peak:
+            peak = c
+        # trailing stop
+        if c <= peak * (1 - trail_pct / 100.0):
+            exit_px = c
+            exit_day = day
+            exit_date = p["trade_date"]
+            break
+    if exit_px is None:
+        exit_px = ws[-1]["close"] or entry  # held to window end
+
+    ret = (exit_px / entry - 1) * 100
+
+    # benchmark (0050) over same entry_date -> exit_date
+    excess = None
+    be = bench_idx.get(entry_date)
+    bx = bench_idx.get(exit_date)
+    if be and bx and (be.get("open") or be.get("close")) and bx.get("close"):
+        b_entry = be.get("open") or be.get("close")
+        b_ret = (bx["close"] / b_entry - 1) * 100
+        excess = ret - b_ret
+
+    return {"stock_id": stock_id, "signal_date": signal_date,
+            "ret": ret, "exit_day": exit_day, "excess": excess}
+
+
+def run_strategy(signal_type="purebuy", trail_pct=8.0, max_window=60, benchmark="0050"):
+    db.init_db()
+    signals = get_signals(signal_type)
+    bench_idx = _bench_index(benchmark)
+    events = [m for (d, sid, name) in signals
+              if (m := strategy_metrics(sid, d, trail_pct, max_window, bench_idx)) is not None]
+
+    print(f"=== 可執行策略回測：訊號 = {signal_type} ===")
+    print(f"進場=訊號隔日開盤；移動停利={trail_pct}%；最長持有={max_window}天；基準={benchmark}")
+    print(f"可分析事件數：{len(events)}")
+    if not events:
+        print("⚠️ 無可用事件。"); return
+    print()
+
+    rets = [e["ret"] for e in events]
+    win = sum(1 for r in rets if r > 0) / len(rets) * 100
+    hold = [e["exit_day"] for e in events]
+    excess = [e["excess"] for e in events if e["excess"] is not None]
+    beat = sum(1 for x in excess if x > 0) / len(excess) * 100 if excess else None
+
+    print(f"【策略績效】")
+    print(f"  平均報酬：{_avg(rets):+.2f}%（中位數 {_median(rets):+.2f}%）")
+    print(f"  勝率：{win:.0f}%")
+    print(f"  平均持有天數：{_avg(hold):.1f} 天（中位數 {_median(hold):.0f} 天）")
+    print()
+    print(f"【超額報酬 vs {benchmark}】（判定是否真有 edge）")
+    if excess:
+        print(f"  平均超額報酬：{_avg(excess):+.2f}%（中位數 {_median(excess):+.2f}%）")
+        print(f"  贏過大盤比例：{beat:.0f}%")
+        verdict = ("✅ 平均超額為正且過半贏大盤 → 訊號可能有 edge"
+                   if _avg(excess) > 0 and beat and beat > 50
+                   else "⚠️ 超額接近零或勝率不足 → 訊號 edge 不明顯，多為大盤beta")
+        print(f"  研判：{verdict}")
+    else:
+        print(f"  （無 {benchmark} 對應股價，無法計算）")
+    print()
+    print("註：出場以觸發當日收盤近似（實務略有滑點）；報酬為原始，超額已扣基準。")
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--signal", default="purebuy",
                     choices=["purebuy", "strongbuy", "topnet"])
-    ap.add_argument("--mode", default="window", choices=["window", "path"],
-                    help="window=固定持有天數; path=動態獲利週期")
+    ap.add_argument("--mode", default="window",
+                    choices=["window", "path", "strategy"],
+                    help="window=固定持有; path=動態週期; strategy=移動停利+超額")
     ap.add_argument("--windows", default="1,3,5,10,20", help="window 模式用")
     ap.add_argument("--window", type=int, default=20, help="path 模式觀察窗天數")
+    ap.add_argument("--trail", type=float, default=8.0, help="strategy 移動停利%")
+    ap.add_argument("--max-window", type=int, default=60, help="strategy 最長持有天數")
+    ap.add_argument("--benchmark", default="0050", help="strategy 超額報酬基準")
     args = ap.parse_args()
     if args.mode == "path":
         run_path(signal_type=args.signal, window=args.window)
+    elif args.mode == "strategy":
+        run_strategy(signal_type=args.signal, trail_pct=args.trail,
+                     max_window=args.max_window, benchmark=args.benchmark)
     else:
         windows = tuple(int(x) for x in args.windows.split(","))
         run(signal_type=args.signal, windows=windows)
